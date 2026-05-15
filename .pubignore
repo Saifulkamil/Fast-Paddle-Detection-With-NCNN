@@ -1,0 +1,21 @@
+# Build artifacts
+example/build/
+example/android/.gradle/
+example/android/.kotlin/
+example/.dart_tool/
+android/.cxx/
+android/.gradle/
+
+# IDE
+.idea/
+*.iml
+
+# Docs not needed in package
+implementation_plan.md
+README copy.md
+
+# Example APK
+**/*.apk
+
+# Git
+.git/
