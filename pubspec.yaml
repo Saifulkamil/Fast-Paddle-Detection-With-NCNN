@@ -1,7 +1,7 @@
-name: paddle_detection
-description: "Plugin paddle detection ppdet pico"
-version: 0.0.1
-homepage:
+name: fast_paddle_detection
+description: "High-performance offline object detection plugin using PP-PicoDet + NCNN with native camera, anti-spoof, and GPU acceleration."
+version: 1.0.0
+homepage: https://github.com/AkmaljonMOBILEdev/fast_paddle_detection
 
 environment:
   sdk: ^3.8.1

@@ -1,5 +1,6 @@
-# Paddle Detection 🎯
+# Fast Paddle Detection 🎯
 
+[![pub package](https://img.shields.io/pub/v/fast_paddle_detection.svg)](https://pub.dev/packages/fast_paddle_detection)
 [![License](https://img.shields.io/badge/License-CC0_1.0-blue.svg)](LICENSE)
 
 A high-performance Flutter plugin for **offline object detection** on Android using **PP-PicoDet** (PaddleDetection) and **NCNN**.
@@ -119,7 +120,7 @@ android/app/src/main/assets/
 ### 1. Import
 
 ```dart
-import 'package:paddle_detection/paddle_detection.dart';
+import 'package:fast_paddle_detection/paddle_detection.dart';
 ```
 
 ### 2. Load Model

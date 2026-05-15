@@ -6,7 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:paddle_detection/paddle_detection.dart';
+import 'package:fast_paddle_detection/paddle_detection.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 void main() => runApp(const MyApp());
