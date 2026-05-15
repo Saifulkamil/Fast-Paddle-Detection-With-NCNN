@@ -9,12 +9,10 @@ This plugin supports real-time detection directly from the camera feed, photo ca
 ## ✨ Key Features
 
 - ⚡ **Real-time Detection**: Detect objects instantly from the live camera preview.
-- 🎯 **Native C++ Bbox Drawing**: Bounding boxes drawn directly on the frame in C++ — zero coordinate mapping issues.
 - 📸 **Photo Capture**: Save both clean and annotated (with bbox) images on detection.
 - 🔦 **Flash Control**: Toggle camera flash/torch on/off.
 - 🔄 **Switch Camera**: Toggle between front and back camera.
 - 📱 **Orientation Aware**: Camera preview rotates with device physical orientation (app stays portrait).
-- 🎛️ **Single Threshold Control**: One knob controls both prob and NMS threshold.
 - 🧠 **Auto Class Detection**: Number of classes read from model blob shape automatically.
 - ⚡ **GPU Acceleration**: Optional Vulkan GPU inference with auto-detection of GPU availability.
 - 📴 **100% Offline**: Uses local NCNN models. No API calls or cloud dependencies.
@@ -334,80 +332,7 @@ The model graph contains these layers that ncnn doesn't support. The plugin regi
 - `Tensor.to`
 
 These are all in the post-processing tail and are never executed (ncnn evaluates lazily).
-
-### How to Train Your Own Model
-
-#### Step 1: Train with PaddleDetection
-
-```bash
-# Clone PaddleDetection
-git clone https://github.com/PaddlePaddle/PaddleDetection.git
-
-# Train PicoDet with your dataset
-python tools/train.py -c configs/picodet/picodet_s_320_coco_lcnet.yml \
-  -o TrainReader.dataset.dataset_dir=/path/to/your/dataset \
-     num_classes=YOUR_NUM_CLASSES
-```
-
-#### Step 2: Export Model (WITH post-processing)
-
-```bash
-python tools/export_model.py \
-  -c configs/picodet/picodet_s_320_coco_lcnet.yml \
-  -o weights=output/best_model.pdparams \
-  --output_dir=inference_model
-```
-
-> **Important**: Export WITH post-processing (default). Do NOT use `export.post_process=False`.
-
-#### Step 3: Convert to ONNX
-
-```bash
-pip install paddle2onnx
-
-paddle2onnx --model_dir inference_model/picodet_s_320_coco_lcnet \
-  --model_filename model.pdmodel \
-  --params_filename model.pdiparams \
-  --save_file picodet.onnx \
-  --opset_version 11
-```
-
-#### Step 4: Simplify ONNX (Recommended)
-
-```bash
-pip install onnxsim
-python -m onnxsim picodet.onnx picodet_sim.onnx
-```
-
-#### Step 5: Convert to NCNN via PNNX
-
-```bash
-# Download PNNX from ncnn releases
-pnnx picodet_sim.onnx inputshape=[1,3,320,320]f32,[1,4]f32
-```
-
-This produces `picodet_sim.ncnn.param` and `picodet_sim.ncnn.bin`.
-
-#### Step 6: Verify Blob Names
-
-Open `picodet_sim.ncnn.param` in a text editor and verify:
-- Input blobs: `in0` and `in1` exist
-- Intermediate blobs: look for the `Concat` that produces class scores and the `BinaryOp` that produces decoded boxes
-- The blob numbers may differ from `317`/`339` — you'll need to update `ppdet_pico.cpp` if they change
-
-#### Step 7: Update Class Labels in C++
-
-Edit `ppdet_pico.cpp` → `draw_detections()`:
-
-```cpp
-static const char* class_names[] = {"your_class_0", "your_class_1", "your_class_2"};
-static const cv::Scalar class_colors[] = {
-    cv::Scalar(0, 255, 0),   // class 0 color (RGB)
-    cv::Scalar(128, 0, 128), // class 1 color (RGB)
-    cv::Scalar(255, 0, 0),   // class 2 color (RGB)
-};
-static const int num_known = 3; // update this
-```
+ 
 
 ### Model Compatibility Checklist
 
