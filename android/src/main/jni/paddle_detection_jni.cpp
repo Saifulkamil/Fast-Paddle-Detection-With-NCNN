@@ -474,6 +474,38 @@ Java_com_iweka_paddle_1detection_PaddleDetectionPlugin_nativeGetNumClass(
 }
 
 // ============================================================================
+// JNI: nativeHasGpu
+// Returns 1 if Vulkan GPU is available, 0 otherwise.
+// ============================================================================
+
+JNIEXPORT jint JNICALL
+Java_com_iweka_paddle_1detection_PaddleDetectionPlugin_nativeHasGpu(
+    JNIEnv* env, jobject thiz)
+{
+#if NCNN_VULKAN
+    return ncnn::get_gpu_count() > 0 ? 1 : 0;
+#else
+    return 0;
+#endif
+}
+
+// ============================================================================
+// JNI: nativeGetGpuCount
+// Returns number of Vulkan GPU devices available.
+// ============================================================================
+
+JNIEXPORT jint JNICALL
+Java_com_iweka_paddle_1detection_PaddleDetectionPlugin_nativeGetGpuCount(
+    JNIEnv* env, jobject thiz)
+{
+#if NCNN_VULKAN
+    return ncnn::get_gpu_count();
+#else
+    return 0;
+#endif
+}
+
+// ============================================================================
 // JNI: nativeDispose
 // ============================================================================
 

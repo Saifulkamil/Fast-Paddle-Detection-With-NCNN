@@ -21,11 +21,16 @@ class CameraDetectionEvent {
   final int imageWidth;
   final int imageHeight;
   final int inferenceMs;
+
+  /// Device physical rotation in degrees (0, 90, 180, 270).
+  /// 0 = portrait, 90 = landscape-left, 270 = landscape-right.
+  final int deviceRotation;
   const CameraDetectionEvent({
     required this.detections,
     required this.imageWidth,
     required this.imageHeight,
     required this.inferenceMs,
+    required this.deviceRotation,
   });
 }
 
@@ -98,6 +103,18 @@ class PaddleDetection {
     return result ?? 0;
   }
 
+  /// Check if device has Vulkan GPU available for inference.
+  Future<bool> hasGpu() async {
+    final result = await _methodChannel.invokeMethod<bool>('hasGpu');
+    return result ?? false;
+  }
+
+  /// Get number of Vulkan GPU devices available.
+  Future<int> getGpuCount() async {
+    final result = await _methodChannel.invokeMethod<int>('getGpuCount');
+    return result ?? 0;
+  }
+
   /// Detect objects in an image file.
   Future<List<DetectionResult>> detect(String imagePath) {
     return PaddleDetectionPlatform.instance.detect(imagePath: imagePath);
@@ -167,6 +184,7 @@ class PaddleDetection {
         imageWidth: (map['imageWidth'] as int?) ?? 0,
         imageHeight: (map['imageHeight'] as int?) ?? 0,
         inferenceMs: (map['inferenceMs'] as int?) ?? 0,
+        deviceRotation: (map['deviceRotation'] as int?) ?? 0,
       );
     });
   }

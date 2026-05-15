@@ -13,8 +13,10 @@ This plugin supports real-time detection directly from the camera feed, photo ca
 - 📸 **Photo Capture**: Save both clean and annotated (with bbox) images on detection.
 - 🔦 **Flash Control**: Toggle camera flash/torch on/off.
 - 🔄 **Switch Camera**: Toggle between front and back camera.
+- 📱 **Orientation Aware**: Camera preview rotates with device physical orientation (app stays portrait).
 - 🎛️ **Single Threshold Control**: One knob controls both prob and NMS threshold.
 - 🧠 **Auto Class Detection**: Number of classes read from model blob shape automatically.
+- ⚡ **GPU Acceleration**: Optional Vulkan GPU inference with auto-detection of GPU availability.
 - 📴 **100% Offline**: Uses local NCNN models. No API calls or cloud dependencies.
 - 🔋 **Optimized Performance**: Minimal bitmap copies per frame, on-demand capture allocation.
 
@@ -126,12 +128,20 @@ import 'package:paddle_detection/paddle_detection.dart';
 ```dart
 final detector = PaddleDetection();
 
-// Load from assets (default)
+// Load from assets (default CPU)
 final info = await detector.loadModel(
   paramName: 'model.ncnn.param',
   binName: 'model.ncnn.bin',
 );
 print('Classes: ${info.numClass}'); // auto-detected from model
+
+// Or load with GPU
+final hasGpu = await detector.hasGpu();
+final info = await detector.loadModel(
+  paramName: 'model.ncnn.param',
+  binName: 'model.ncnn.bin',
+  cpuGpu: hasGpu ? 1 : 0, // 0=CPU, 1=GPU(Vulkan), 2=GPU(Turnip)
+);
 
 // Or load from file path (user-picked)
 final info = await detector.loadModelFromFile(
@@ -159,6 +169,7 @@ Texture(textureId: cam.textureId)
 // Listen to detection stream
 detector.detectionStream.listen((event) {
   print('${event.detections.length} objects, ${event.inferenceMs}ms');
+  print('Device rotation: ${event.deviceRotation}°');
 });
 
 // Toggle flash
@@ -197,7 +208,14 @@ for (final det in results) {
 }
 ```
 
-### 7. Cleanup
+### 7. GPU Detection
+
+```dart
+final hasGpu = await detector.hasGpu();     // true if Vulkan available
+final gpuCount = await detector.getGpuCount(); // number of GPU devices
+```
+
+### 8. Cleanup
 
 ```dart
 await detector.stopCamera();
@@ -210,10 +228,12 @@ await detector.dispose();
 
 | Method | Description |
 | :----- | :---------- |
-| `loadModel(paramName, binName)` | Load model from Android assets |
-| `loadModelFromFile(paramPath, binPath)` | Load model from absolute file paths |
+| `loadModel(paramName, binName, cpuGpu)` | Load model from Android assets |
+| `loadModelFromFile(paramPath, binPath, cpuGpu)` | Load model from absolute file paths |
 | `setThreshold(threshold)` | Set detection threshold (0.0–1.0) |
 | `getNumClass()` | Get number of classes from loaded model |
+| `hasGpu()` | Check if Vulkan GPU is available |
+| `getGpuCount()` | Get number of GPU devices |
 | `detect(imagePath)` | Run detection on image file |
 | `detectFromBytes(data, width, height)` | Run detection on raw RGBA bytes |
 | `startCamera()` | Start native camera, returns texture info |
@@ -227,39 +247,193 @@ await detector.dispose();
 ### Data Classes
 
 ```dart
-// Model info after loading
 class ModelInfo {
   final bool success;
-  final int numClass;
+  final int numClass; // auto-detected from model
 }
 
-// Single detection result
 class DetectionResult {
   final int label;
   final double probability;
   final double x, y, width, height; // absolute pixels
 }
 
-// Camera info
 class CameraInfo {
   final int textureId;
   final int previewWidth, previewHeight;
 }
 
-// Realtime stream event
 class CameraDetectionEvent {
   final List<DetectionResult> detections;
   final int imageWidth, imageHeight;
   final int inferenceMs;
+  final int deviceRotation; // 0, 90, 180, 270
 }
 
-// Capture result
 class CaptureResult {
-  final String cleanPath;
-  final String annotatedPath;
+  final String cleanPath;     // image without bbox
+  final String annotatedPath; // image with bbox
   final List<DetectionResult> detections;
 }
 ```
+
+---
+
+## 🧠 Model Specification (Important!)
+
+This plugin expects a specific NCNN model format. If you want to use your own model or train a custom one, follow this specification.
+
+### Model Architecture
+
+The plugin is designed for **PP-PicoDet** models exported from PaddleDetection via PNNX/ONNX to NCNN format, with **post-processing baked into the graph**.
+
+### Input Specification
+
+The model must have **2 input blobs**:
+
+| Blob Name | Shape | Description |
+|-----------|-------|-------------|
+| `in0` | `[4]` | Metadata: `[target_height, target_width, scale_factor_h, scale_factor_w]` |
+| `in1` | `[3, 320, 320]` | Normalized RGB image tensor (after letterbox + normalize) |
+
+**Preprocessing (handled by plugin):**
+1. Resize image keeping aspect ratio to fit 320×320
+2. Pad (letterbox) to exactly 320×320 with zeros
+3. Normalize: `mean = [123.675, 116.28, 103.53]`, `norm = [0.017125, 0.017507, 0.017429]`
+4. `in0` is filled with `[320, 320, scale_h, scale_w]` where scale = 320/max(img_w, img_h)
+
+### Output Specification (Intermediate Blobs)
+
+The plugin extracts **intermediate blobs** (not final output), because the model's built-in post-processing uses ops that ncnn doesn't support natively:
+
+| Blob Name | Shape | Description |
+|-----------|-------|-------------|
+| `"317"` | `[w=num_anchors, h=num_class]` | Per-anchor class scores (already sigmoid-activated) |
+| `"339"` | `[w=4, h=num_anchors]` | Decoded boxes in xyxy format (in 320×320 input pixel space, multiplied by stride factor) |
+
+**For the default PicoDet model:**
+- `num_anchors = 2125` (sum of all FPN levels: 40×40 + 20×20 + 10×10 + 5×5 = 1600+400+100+25)
+- `num_class = 2` (detected from blob shape automatically)
+
+### Post-processing (handled by plugin in C++)
+
+1. For each anchor: find best class score → filter by `prob_threshold`
+2. Read box coordinates from blob 339: `[x1, y1, x2, y2]`
+3. Class-aware NMS with `nms_threshold`
+4. Inverse letterbox: divide coordinates by scale factor to get original image pixels
+
+### Unsupported Layers (Handled by No-op Stubs)
+
+The model graph contains these layers that ncnn doesn't support. The plugin registers no-op stubs for them so `load_param` succeeds:
+
+- `pnnx.Expression`
+- `NonMaxSuppression`
+- `TopK`
+- `Gather`
+- `F.embedding`
+- `Tensor.to`
+
+These are all in the post-processing tail and are never executed (ncnn evaluates lazily).
+
+### How to Train Your Own Model
+
+#### Step 1: Train with PaddleDetection
+
+```bash
+# Clone PaddleDetection
+git clone https://github.com/PaddlePaddle/PaddleDetection.git
+
+# Train PicoDet with your dataset
+python tools/train.py -c configs/picodet/picodet_s_320_coco_lcnet.yml \
+  -o TrainReader.dataset.dataset_dir=/path/to/your/dataset \
+     num_classes=YOUR_NUM_CLASSES
+```
+
+#### Step 2: Export Model (WITH post-processing)
+
+```bash
+python tools/export_model.py \
+  -c configs/picodet/picodet_s_320_coco_lcnet.yml \
+  -o weights=output/best_model.pdparams \
+  --output_dir=inference_model
+```
+
+> **Important**: Export WITH post-processing (default). Do NOT use `export.post_process=False`.
+
+#### Step 3: Convert to ONNX
+
+```bash
+pip install paddle2onnx
+
+paddle2onnx --model_dir inference_model/picodet_s_320_coco_lcnet \
+  --model_filename model.pdmodel \
+  --params_filename model.pdiparams \
+  --save_file picodet.onnx \
+  --opset_version 11
+```
+
+#### Step 4: Simplify ONNX (Recommended)
+
+```bash
+pip install onnxsim
+python -m onnxsim picodet.onnx picodet_sim.onnx
+```
+
+#### Step 5: Convert to NCNN via PNNX
+
+```bash
+# Download PNNX from ncnn releases
+pnnx picodet_sim.onnx inputshape=[1,3,320,320]f32,[1,4]f32
+```
+
+This produces `picodet_sim.ncnn.param` and `picodet_sim.ncnn.bin`.
+
+#### Step 6: Verify Blob Names
+
+Open `picodet_sim.ncnn.param` in a text editor and verify:
+- Input blobs: `in0` and `in1` exist
+- Intermediate blobs: look for the `Concat` that produces class scores and the `BinaryOp` that produces decoded boxes
+- The blob numbers may differ from `317`/`339` — you'll need to update `ppdet_pico.cpp` if they change
+
+#### Step 7: Update Class Labels in C++
+
+Edit `ppdet_pico.cpp` → `draw_detections()`:
+
+```cpp
+static const char* class_names[] = {"your_class_0", "your_class_1", "your_class_2"};
+static const cv::Scalar class_colors[] = {
+    cv::Scalar(0, 255, 0),   // class 0 color (RGB)
+    cv::Scalar(128, 0, 128), // class 1 color (RGB)
+    cv::Scalar(255, 0, 0),   // class 2 color (RGB)
+};
+static const int num_known = 3; // update this
+```
+
+### Model Compatibility Checklist
+
+| Requirement | ✓ |
+|-------------|---|
+| PicoDet architecture (PP-PicoDet-S/M/L) | Required |
+| Input size 320×320 | Required (hardcoded in plugin) |
+| Post-processing baked in (NMS, TopK, etc.) | Required |
+| Exported via PNNX from ONNX | Required |
+| 2 input blobs (`in0` metadata, `in1` pixels) | Required |
+| Intermediate score blob accessible | Required |
+| Intermediate box blob accessible | Required |
+
+### Changing Blob Names
+
+If your model has different blob numbers for scores/boxes, update in `ppdet_pico.cpp`:
+
+```cpp
+// In detect() function:
+int r1 = ex.extract("317", scores);  // ← change "317" to your score blob
+int r2 = ex.extract("339", boxes);   // ← change "339" to your box blob
+```
+
+To find the correct blob numbers, open your `.param` file and look for:
+- **Score blob**: the `Concat` that merges all FPN-level class predictions (shape `[num_anchors, num_class]`)
+- **Box blob**: the `BinaryOp` (multiply) that produces decoded xyxy boxes (shape `[4, num_anchors]`)
 
 ---
 
@@ -270,8 +444,10 @@ class CaptureResult {
 3. **Capture Guard**: The plugin only allows capture when objects are detected — no empty captures.
 4. **Flash**: Only available on back camera. Automatically disabled when switching to front.
 5. **Model Size**: Use lightweight PicoDet models (PP-PicoDet-S) for mobile. Larger models will be slower.
-6. **GPU Mode**: Set `cpuGpu: 1` for Vulkan GPU acceleration on supported devices. CPU (`cpuGpu: 0`) is more stable across all devices.
+6. **GPU Mode**: Set `cpuGpu: 1` for Vulkan GPU acceleration on supported devices. CPU (`cpuGpu: 0`) is more stable across all devices. Not all devices are faster with GPU — test both.
 7. **Debug FPS**: In debug builds, FPS and inference time are shown as an overlay badge.
+8. **Orientation**: Camera preview automatically rotates with device physical orientation while app stays portrait.
+9. **Num Classes**: The plugin auto-detects the number of classes from the model's blob shape — no need to specify manually.
 
 ---
 
@@ -287,15 +463,18 @@ Flutter (Dart API)
 Kotlin (CameraX + Plugin)
     │
     ├── CameraX ImageAnalysis → frame capture
+    ├── OrientationEventListener → dynamic rotation
     ├── Rotate bitmap → JNI call
     ├── Render annotated frame → Flutter Texture
-    └── Stream detections → Dart
+    └── Stream detections + inferenceMs + deviceRotation → Dart
           │
           ▼
 C++ / JNI
     │
     ├── NCNN inference (ncnn-20260113-android-vulkan)
-    ├── Post-processing (threshold + NMS)
+    │     ├── No-op stub layers for unsupported ops
+    │     └── Extract intermediate blobs (lazy evaluation)
+    ├── Post-processing (threshold + NMS + inverse letterbox)
     ├── OpenCV bbox drawing (rectangle + putText)
     └── OpenCV Mobile 4.13.0 (core + imgproc + highgui)
 ```

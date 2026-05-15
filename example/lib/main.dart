@@ -39,10 +39,17 @@ class _HomePageState extends State<HomePage> {
   String? _customParamPath, _customBinPath;
   bool get _useCustom => _customParamPath != null && _customBinPath != null;
   int _tabIndex = 0;
+  bool _gpuAvailable = false;
+  bool _useGpu = false; // default CPU
 
   @override
   void initState() {
     super.initState();
+    _checkGpuAndLoad();
+  }
+
+  Future<void> _checkGpuAndLoad() async {
+    _gpuAvailable = await _detector.hasGpu();
     _loadModel();
   }
 
@@ -58,15 +65,17 @@ class _HomePageState extends State<HomePage> {
       _status = 'Loading...';
     });
     try {
+      final cpuGpu = _useGpu ? 1 : 0;
       final info = _useCustom
-          ? await _detector.loadModelFromFile(paramPath: _customParamPath!, binPath: _customBinPath!)
-          : await _detector.loadModel(paramName: 'model.ncnn.param', binName: 'model.ncnn.bin');
+          ? await _detector.loadModelFromFile(paramPath: _customParamPath!, binPath: _customBinPath!, cpuGpu: cpuGpu)
+          : await _detector.loadModel(paramName: 'model.ncnn.param', binName: 'model.ncnn.bin', cpuGpu: cpuGpu);
       if (info.success) await _detector.setThreshold(threshold: _threshold);
+      final backend = _useGpu ? 'GPU' : 'CPU';
       setState(() {
         _modelLoaded = info.success;
         _numClass = info.numClass;
         _loading = false;
-        _status = info.success ? 'Model loaded ✓ (${info.numClass} classes)' : 'Load failed';
+        _status = info.success ? 'Model loaded ✓ (${info.numClass} cls, $backend)' : 'Load failed';
       });
     } catch (e) {
       setState(() {
@@ -123,9 +132,15 @@ class _HomePageState extends State<HomePage> {
       modelLoaded: _modelLoaded,
       loading: _loading,
       numClass: _numClass,
+      gpuAvailable: _gpuAvailable,
+      useGpu: _useGpu,
       onThresholdChanged: (v) {
         setState(() => _threshold = v);
         _applyThreshold();
+      },
+      onGpuChanged: (v) {
+        setState(() => _useGpu = v);
+        _loadModel(); // reload with new backend
       },
       onPickModel: _pickModel,
       onUseBundled: _useBundled,
@@ -198,7 +213,23 @@ class _CameraTabState extends State<_CameraTab> {
   int _fps = 0;
   int _frameCount = 0;
   int _inferenceMs = 0;
+  int _deviceRotation = 0;
   Timer? _fpsTimer;
+
+  /// Convert device rotation degrees to RotatedBox quarter turns.
+  /// deviceRotation: 0=portrait, 90=landscape-left, 180=upside-down, 270=landscape-right
+  int get _quarterTurns {
+    switch (_deviceRotation) {
+      case 90:
+        return 1; // landscape left
+      case 180:
+        return 2; // upside down
+      case 270:
+        return 3; // landscape right
+      default:
+        return 0; // portrait
+    }
+  }
 
   @override
   void didUpdateWidget(covariant _CameraTab old) {
@@ -222,6 +253,11 @@ class _CameraTabState extends State<_CameraTab> {
           setState(() {
             _detections = event.detections;
             _inferenceMs = event.inferenceMs;
+            _deviceRotation = event.deviceRotation;
+            if (event.imageWidth > 0 && event.imageHeight > 0) {
+              _previewW = event.imageWidth;
+              _previewH = event.imageHeight;
+            }
           });
         }
       });
@@ -425,12 +461,18 @@ class _CameraTabState extends State<_CameraTab> {
     return Stack(
       fit: StackFit.expand,
       children: [
-        FittedBox(
-          fit: BoxFit.cover,
-          child: SizedBox(
-            width: _previewW.toDouble(),
-            height: _previewH.toDouble(),
-            child: Texture(textureId: _textureId!),
+        // Rotate preview to match physical device orientation
+        Center(
+          child: RotatedBox(
+            quarterTurns: _quarterTurns,
+            child: FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: _previewW.toDouble(),
+                height: _previewH.toDouble(),
+                child: Texture(textureId: _textureId!),
+              ),
+            ),
           ),
         ),
         // Top info (FPS only in debug mode — this is Flutter overlay, not drawn on image)
@@ -637,7 +679,10 @@ class _SettingsSheet extends StatefulWidget {
   final String? customParam;
   final bool modelLoaded, loading;
   final int numClass;
+  final bool gpuAvailable;
+  final bool useGpu;
   final ValueChanged<double> onThresholdChanged;
+  final ValueChanged<bool> onGpuChanged;
   final VoidCallback onPickModel, onUseBundled, onReload;
   const _SettingsSheet({
     required this.threshold,
@@ -646,7 +691,10 @@ class _SettingsSheet extends StatefulWidget {
     required this.modelLoaded,
     required this.loading,
     required this.numClass,
+    required this.gpuAvailable,
+    required this.useGpu,
     required this.onThresholdChanged,
+    required this.onGpuChanged,
     required this.onPickModel,
     required this.onUseBundled,
     required this.onReload,
@@ -657,10 +705,12 @@ class _SettingsSheet extends StatefulWidget {
 
 class _SettingsSheetState extends State<_SettingsSheet> {
   late double _tr;
+  late bool _gpu;
   @override
   void initState() {
     super.initState();
     _tr = widget.threshold;
+    _gpu = widget.useGpu;
   }
 
   @override
@@ -695,6 +745,30 @@ class _SettingsSheetState extends State<_SettingsSheet> {
             widget.onThresholdChanged(v);
           },
         ),
+        const Divider(),
+        // GPU toggle
+        Row(
+          children: [
+            const Text('Compute: ', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Spacer(),
+            Text(
+              widget.gpuAvailable ? (_gpu ? 'GPU (Vulkan)' : 'CPU') : 'CPU only (no GPU)',
+              style: const TextStyle(fontSize: 12),
+            ),
+            const SizedBox(width: 8),
+            Switch(
+              value: _gpu,
+              onChanged: widget.gpuAvailable
+                  ? (v) {
+                      setState(() => _gpu = v);
+                      widget.onGpuChanged(v);
+                    }
+                  : null,
+            ),
+          ],
+        ),
+        if (!widget.gpuAvailable)
+          const Text('GPU not available on this device', style: TextStyle(fontSize: 11, color: Colors.grey)),
         const Divider(),
         Text('Classes from model: ${widget.numClass}', style: const TextStyle(fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),

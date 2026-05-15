@@ -4,7 +4,9 @@ import android.app.Activity
 import android.content.Context
 import android.content.res.AssetManager
 import android.graphics.*
+import android.hardware.SensorManager
 import android.util.Size
+import android.view.OrientationEventListener
 import android.view.Surface
 import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
@@ -44,6 +46,9 @@ class PaddleDetectionPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
     private var previewHeight = 0
     private var flashEnabled = false
     private var useFrontCamera = false
+    private var orientationListener: OrientationEventListener? = null
+    private var imageAnalysis: ImageAnalysis? = null
+    private var currentDeviceRotation = 0
 
     // Last frame for capture
     @Volatile private var lastAnnotatedBitmap: Bitmap? = null
@@ -72,6 +77,8 @@ class PaddleDetectionPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
     private external fun nativeDetectFromBytes(data: ByteArray, width: Int, height: Int): Array<FloatArray>?
     private external fun nativeSetThreshold(probThreshold: Float, nmsThreshold: Float)
     private external fun nativeGetNumClass(): Int
+    private external fun nativeHasGpu(): Int
+    private external fun nativeGetGpuCount(): Int
     private external fun nativeDispose()
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -110,6 +117,8 @@ class PaddleDetectionPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
             "detectFromBytes" -> handleDetectFromBytes(call, result)
             "setThreshold" -> handleSetThreshold(call, result)
             "getNumClass" -> result.success(nativeGetNumClass())
+            "hasGpu" -> result.success(nativeHasGpu() > 0)
+            "getGpuCount" -> result.success(nativeGetGpuCount())
             "startCamera" -> handleStartCamera(call, result)
             "stopCamera" -> { stopCamera(); result.success(true) }
             "toggleFlash" -> handleToggleFlash(call, result)
@@ -278,6 +287,30 @@ class PaddleDetectionPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
                 val lifecycleOwner = activity as? LifecycleOwner ?: ProcessLifecycleOwner.get()
                 val camera = cameraProvider?.bindToLifecycle(lifecycleOwner, selector, analysis)
                 cameraControl = camera?.cameraControl
+                imageAnalysis = analysis
+
+                // Listen for device orientation changes to update analysis rotation
+                orientationListener = object : OrientationEventListener(ctx, SensorManager.SENSOR_DELAY_NORMAL) {
+                    override fun onOrientationChanged(orientation: Int) {
+                        if (orientation == ORIENTATION_UNKNOWN) return
+                        val rotation = when {
+                            orientation >= 315 || orientation < 45 -> Surface.ROTATION_0
+                            orientation in 45..134 -> Surface.ROTATION_270
+                            orientation in 135..224 -> Surface.ROTATION_180
+                            else -> Surface.ROTATION_90
+                        }
+                        imageAnalysis?.targetRotation = rotation
+                        // Store current device rotation for Flutter
+                        currentDeviceRotation = when (rotation) {
+                            Surface.ROTATION_0 -> 0
+                            Surface.ROTATION_90 -> 90
+                            Surface.ROTATION_180 -> 180
+                            Surface.ROTATION_270 -> 270
+                            else -> 0
+                        }
+                    }
+                }
+                orientationListener?.enable()
 
                 previewWidth = 480
                 previewHeight = 640
@@ -379,7 +412,7 @@ class PaddleDetectionPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
 
             // Stream to Flutter
             val results = convertDetections(detections)
-            val payload = mapOf("detections" to results, "imageWidth" to imgW, "imageHeight" to imgH, "inferenceMs" to inferenceMs)
+            val payload = mapOf("detections" to results, "imageWidth" to imgW, "imageHeight" to imgH, "inferenceMs" to inferenceMs, "deviceRotation" to currentDeviceRotation)
             activity?.runOnUiThread { eventSink?.success(payload) }
         } catch (_: Exception) {
         } finally {
@@ -389,6 +422,9 @@ class PaddleDetectionPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
     }
 
     private fun stopCamera() {
+        orientationListener?.disable()
+        orientationListener = null
+        imageAnalysis = null
         cameraProvider?.unbindAll()
         cameraProvider = null
         cameraControl = null
