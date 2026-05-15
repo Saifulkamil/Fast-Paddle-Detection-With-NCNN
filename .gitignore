@@ -31,7 +31,14 @@ migrate_working_dir/
 .flutter-plugins
 .flutter-plugins-dependencies
 build/
+
+# Finetune model (private, don't push)
+example/android/app/src/main/assets/finetune_model.ncnn.param
+example/android/app/src/main/assets/finetune_model.ncnn.bin
+
+# New COCO model (needs investigation, don't push yet)  
 example/android/app/src/main/assets/model.ncnn.param
 example/android/app/src/main/assets/model.ncnn.bin
+
 implementation_plan.md
 

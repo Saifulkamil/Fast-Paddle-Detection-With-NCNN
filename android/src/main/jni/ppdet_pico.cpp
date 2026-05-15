@@ -153,7 +153,8 @@ PicoDet::PicoDet()
       num_class(1),
       prob_threshold(0.4f),
       nms_threshold(0.5f),
-      anti_spoof_enabled(false)
+      anti_spoof_enabled(false),
+      input_format(0)
 {
 }
 
@@ -174,6 +175,8 @@ static void register_stubs(ncnn::Net& net)
         "Gather",
         "F.embedding",
         "Tensor.to",
+        "NonZero",
+        "ExpandDims",
     };
     for (const char* t : unknown_types)
     {
@@ -190,6 +193,9 @@ int PicoDet::load(const char* parampath, const char* modelpath,
 {
     picodet_net.clear();
     num_class = std::max(1, num_class_hint);
+    input_format = 0;
+    score_blob_name.clear();
+    box_blob_name.clear();
 
     picodet_net.opt.use_fp16_packed = use_fp16;
     picodet_net.opt.use_fp16_storage = use_fp16;
@@ -215,6 +221,8 @@ int PicoDet::load(const char* parampath, const char* modelpath,
     }
 
     LOGD("Model loaded (file): num_class_hint=%d, target_size=%d", num_class, target_size);
+    // Auto-detect input format from graph structure
+    _detect_input_format();
     return 0;
 }
 
@@ -223,6 +231,9 @@ int PicoDet::load(AAssetManager* mgr, const char* parampath, const char* modelpa
 {
     picodet_net.clear();
     num_class = std::max(1, num_class_hint);
+    input_format = 0;
+    score_blob_name.clear();
+    box_blob_name.clear();
 
     picodet_net.opt.use_fp16_packed = use_fp16;
     picodet_net.opt.use_fp16_storage = use_fp16;
@@ -248,6 +259,8 @@ int PicoDet::load(AAssetManager* mgr, const char* parampath, const char* modelpa
     }
 
     LOGD("Model loaded (asset): num_class_hint=%d, target_size=%d", num_class, target_size);
+    // Auto-detect input format from graph structure
+    _detect_input_format();
     return 0;
 }
 
@@ -260,194 +273,282 @@ void PicoDet::set_target_size(int /*_target_size*/)
 void PicoDet::set_prob_threshold(float t) { prob_threshold = t; }
 void PicoDet::set_nms_threshold(float t)  { nms_threshold = t; }
 
+void PicoDet::_detect_input_format()
+{
+    const std::vector<ncnn::Layer*>& layers = picodet_net.layers();
+
+    // Count Input layers
+    int input_count = 0;
+    for (size_t i = 0; i < layers.size() && i < 5; i++) {
+        if (layers[i]->bottoms.empty() && layers[i]->tops.size() == 1)
+            input_count++;
+    }
+
+    if (input_count == 1)
+    {
+        // Single input → Format C (no postprocess, FPN decode)
+        input_format = 3;
+        // Detect num_class by quick-extracting out0 shape
+        ncnn::Mat dummy_in(target_size, target_size, 3, (size_t)4u);
+        dummy_in.fill(0.f);
+        ncnn::Extractor ex = picodet_net.create_extractor();
+        ex.input("in0", dummy_in);
+        ncnn::Mat cls0;
+        if (ex.extract("out0", cls0) == 0 && cls0.h > 0 && cls0.w > 0) {
+            // After Permute, shape is [h=num_class, w=num_anchors] or vice versa
+            // num_class is always smaller than num_anchors
+            num_class = std::min(cls0.h, cls0.w);
+            LOGD("_detect_input_format: Format C, num_class=%d from out0 shape (h=%d w=%d)", num_class, cls0.h, cls0.w);
+        } else {
+            LOGD("_detect_input_format: Format C, could not detect num_class, keeping %d", num_class);
+        }
+        return;
+    }
+
+    // 2 inputs — find first non-Input layer
+    size_t first_real = 0;
+    for (size_t i = 0; i < layers.size(); i++) {
+        if (!layers[i]->bottoms.empty()) { first_real = i; break; }
+    }
+    if (first_real == 0 || layers[first_real]->bottoms.empty()) {
+        input_format = 1; score_blob_name = "317"; box_blob_name = "339"; return;
+    }
+
+    int first_input_blob = layers[first_real]->bottoms[0];
+    if (first_input_blob == 0) {
+        input_format = 2; score_blob_name = "313"; box_blob_name = "335";
+        LOGD("_detect_input_format: Format B (in0=pixels, in1=meta2)");
+    } else {
+        input_format = 1; score_blob_name = "317"; box_blob_name = "339";
+        LOGD("_detect_input_format: Format A (in0=meta4, in1=pixels)");
+    }
+}
+
+// ============================================================================
+// FPN decode for format C (model without postprocess)
+// Outputs: out0-3 = cls [num_class, anchors], out4-7 = dis [32, anchors]
+// Strides: 8, 16, 32, 64. reg_max=7 (32 = 4*8 DFL bins)
+// ============================================================================
+
+int PicoDet::_detect_fpn(const ncnn::Mat& in_pad, float scale, int img_w, int img_h, std::vector<DetObject>& objects)
+{
+    static const int strides[] = {8, 16, 32, 64};
+    static const char* cls_names[] = {"out0", "out1", "out2", "out3"};
+    static const char* dis_names[] = {"out4", "out5", "out6", "out7"};
+    const int reg_max = 7;
+    const int num_strides = 4;
+
+    ncnn::Extractor ex = picodet_net.create_extractor();
+    ex.input("in0", in_pad);
+
+    std::vector<DetObject> proposals;
+    proposals.reserve(256);
+
+    for (int s = 0; s < num_strides; s++)
+    {
+        ncnn::Mat cls_mat, dis_mat;
+        if (ex.extract(cls_names[s], cls_mat) != 0) { LOGE("FPN: extract %s failed", cls_names[s]); continue; }
+        if (ex.extract(dis_names[s], dis_mat) != 0) { LOGE("FPN: extract %s failed", dis_names[s]); continue; }
+
+        // After Permute: shape could be [h=num_class, w=anchors] or [h=anchors, w=num_class]
+        // num_class is always smaller dimension
+        int nc, num_anchors_stride;
+        if (cls_mat.h <= cls_mat.w) {
+            nc = cls_mat.h;
+            num_anchors_stride = cls_mat.w;
+        } else {
+            nc = cls_mat.w;
+            num_anchors_stride = cls_mat.h;
+        }
+        const int feat_w = target_size / strides[s];
+        const int feat_h = target_size / strides[s];
+        const bool cls_row_is_class = (cls_mat.h == nc); // true if row=class, col=anchor
+
+        // Update num_class from first stride
+        if (s == 0) num_class = nc;
+
+        for (int a = 0; a < num_anchors_stride; a++)
+        {
+            // Find best class
+            int best_label = 0;
+            float best_score = -FLT_MAX;
+            for (int k = 0; k < nc; k++)
+            {
+                float score = cls_row_is_class ? cls_mat.row(k)[a] : cls_mat.row(a)[k];
+                if (score > best_score) { best_score = score; best_label = k; }
+            }
+            if (best_score < prob_threshold) continue;
+
+            // DFL decode: softmax over reg_max+1 bins per side
+            // dis_mat: [h=32, w=anchors] or [h=anchors, w=32]
+            const bool dis_row_is_bin = (dis_mat.h == 4 * (reg_max + 1));
+            float dist[4];
+            for (int side = 0; side < 4; side++)
+            {
+                float maxv = -FLT_MAX;
+                for (int b = 0; b <= reg_max; b++) {
+                    float v = dis_row_is_bin ? dis_mat.row(side * (reg_max + 1) + b)[a] : dis_mat.row(a)[side * (reg_max + 1) + b];
+                    if (v > maxv) maxv = v;
+                }
+                float exp_sum = 0.f;
+                for (int b = 0; b <= reg_max; b++) {
+                    float v = dis_row_is_bin ? dis_mat.row(side * (reg_max + 1) + b)[a] : dis_mat.row(a)[side * (reg_max + 1) + b];
+                    exp_sum += std::exp(v - maxv);
+                }
+                float expectation = 0.f;
+                for (int b = 0; b <= reg_max; b++) {
+                    float v = dis_row_is_bin ? dis_mat.row(side * (reg_max + 1) + b)[a] : dis_mat.row(a)[side * (reg_max + 1) + b];
+                    expectation += b * (std::exp(v - maxv) / exp_sum);
+                }
+                dist[side] = expectation;
+            }
+
+            int gx = a % feat_w;
+            int gy = a / feat_w;
+            float cx = (gx + 0.5f) * strides[s];
+            float cy = (gy + 0.5f) * strides[s];
+
+            float x1 = cx - dist[0] * strides[s];
+            float y1 = cy - dist[1] * strides[s];
+            float x2 = cx + dist[2] * strides[s];
+            float y2 = cy + dist[3] * strides[s];
+
+            DetObject obj;
+            obj.label = best_label;
+            obj.prob = best_score;
+            obj.rect.x = x1;
+            obj.rect.y = y1;
+            obj.rect.width = x2 - x1;
+            obj.rect.height = y2 - y1;
+            if (obj.rect.width > 0 && obj.rect.height > 0)
+                proposals.push_back(obj);
+        }
+    }
+
+    // NMS
+    qsort_descent(proposals);
+    std::vector<int> picked;
+    nms_class_aware(proposals, picked, nms_threshold);
+
+    // Inverse letterbox
+    objects.reserve(picked.size());
+    for (size_t i = 0; i < picked.size(); i++)
+    {
+        DetObject obj = proposals[picked[i]];
+        float x1 = obj.rect.x / scale;
+        float y1 = obj.rect.y / scale;
+        float x2 = (obj.rect.x + obj.rect.width) / scale;
+        float y2 = (obj.rect.y + obj.rect.height) / scale;
+        x1 = std::max(std::min(x1, (float)(img_w - 1)), 0.f);
+        y1 = std::max(std::min(y1, (float)(img_h - 1)), 0.f);
+        x2 = std::max(std::min(x2, (float)(img_w - 1)), 0.f);
+        y2 = std::max(std::min(y2, (float)(img_h - 1)), 0.f);
+        obj.rect.x = x1; obj.rect.y = y1;
+        obj.rect.width = x2 - x1; obj.rect.height = y2 - y1;
+        if (obj.rect.width > 0 && obj.rect.height > 0)
+            objects.push_back(obj);
+    }
+
+    LOGD("FPN detect: proposals=%d kept=%d", (int)proposals.size(), (int)objects.size());
+    return 0;
+}
+
 int PicoDet::detect(const cv::Mat& rgb, std::vector<DetObject>& objects)
 {
     objects.clear();
 
-    // Anti-spoof: if enabled, check if image is from screen first
-    if (anti_spoof_enabled)
+    if (anti_spoof_enabled && is_from_screen(rgb))
     {
-        if (is_from_screen(rgb))
-        {
-            LOGD("detect: anti-spoof triggered — image appears to be from screen, skipping detection");
-            return 1; // return 1 = spoof detected, no objects
-        }
+        LOGD("detect: anti-spoof triggered");
+        return 1;
     }
 
     const int img_w = rgb.cols;
     const int img_h = rgb.rows;
 
-    // ----- letterbox to 320x320 (top-left aligned, pad bottom/right) -----
-    int w = img_w;
-    int h = img_h;
+    // Letterbox
+    int w = img_w, h = img_h;
     float scale;
-    if (w > h)
-    {
-        scale = (float)target_size / w;
-        w = target_size;
-        h = (int)(img_h * scale);
-    }
-    else
-    {
-        scale = (float)target_size / h;
-        h = target_size;
-        w = (int)(img_w * scale);
-    }
+    if (w > h) { scale = (float)target_size / w; w = target_size; h = (int)(img_h * scale); }
+    else { scale = (float)target_size / h; h = target_size; w = (int)(img_w * scale); }
 
-    ncnn::Mat in = ncnn::Mat::from_pixels_resize(
-        rgb.data, ncnn::Mat::PIXEL_RGB, img_w, img_h, w, h);
-
-    const int wpad = target_size - w;
-    const int hpad = target_size - h;
+    ncnn::Mat in = ncnn::Mat::from_pixels_resize(rgb.data, ncnn::Mat::PIXEL_RGB, img_w, img_h, w, h);
     ncnn::Mat in_pad;
+    int wpad = target_size - w, hpad = target_size - h;
     if (wpad > 0 || hpad > 0)
-    {
-        ncnn::copy_make_border(in, in_pad,
-                               0, hpad, 0, wpad,
-                               ncnn::BORDER_CONSTANT, 0.f);
-    }
+        ncnn::copy_make_border(in, in_pad, 0, hpad, 0, wpad, ncnn::BORDER_CONSTANT, 0.f);
     else
-    {
         in_pad = in;
-    }
 
-    // PaddleDetection PicoDet standard normalization (RGB order)
     const float mean_vals[3] = {123.675f, 116.28f, 103.53f};
     const float norm_vals[3] = {0.017125f, 0.017507f, 0.017429f};
     in_pad.substract_mean_normalize(mean_vals, norm_vals);
 
-    // ----- in0 carries [h, w, scale_h, scale_w] for the (now-skipped) tail.
-    //        We still feed it because the early graph references in0 via Slice. -----
-    ncnn::Mat in0(4);
+    // Format C: FPN decode (single input, no postprocess)
+    if (input_format == 3)
     {
-        float* p = (float*)in0.data;
-        p[0] = (float)target_size;
-        p[1] = (float)target_size;
-        p[2] = scale;
-        p[3] = scale;
+        return _detect_fpn(in_pad, scale, img_w, img_h, objects);
     }
 
-    // ----- inference: extract intermediate blobs only -----
-    ncnn::Extractor ex = picodet_net.create_extractor();
-    ex.input("in0", in0);
-    ex.input("in1", in_pad);
+    // Format A/B: extract intermediate blobs
+    ncnn::Mat meta4(4);
+    { float* p = (float*)meta4.data; p[0] = (float)target_size; p[1] = (float)target_size; p[2] = scale; p[3] = scale; }
+    ncnn::Mat meta2(2);
+    { float* p = (float*)meta2.data; p[0] = scale; p[1] = scale; }
 
-    ncnn::Mat scores; // expected: [w=num_anchors, h=num_class]
-    ncnn::Mat boxes;  // expected: [w=4, h=num_anchors]
-    int r1 = ex.extract("317", scores);
-    int r2 = ex.extract("339", boxes);
-    if (r1 != 0 || r2 != 0)
+    ncnn::Extractor ex = picodet_net.create_extractor();
+    if (input_format == 2) { ex.input("in0", in_pad); ex.input("in1", meta2); }
+    else { ex.input("in0", meta4); ex.input("in1", in_pad); }
+
+    ncnn::Mat scores, boxes;
+    int r1 = ex.extract(score_blob_name.c_str(), scores);
+    int r2 = ex.extract(box_blob_name.c_str(), boxes);
+
+    if (r1 != 0 || r2 != 0 || scores.empty() || boxes.empty() || scores.w == 0 || boxes.w == 0)
     {
-        LOGE("extract failed: scores ret=%d boxes ret=%d", r1, r2);
+        LOGE("extract failed: r1=%d r2=%d format=%d", r1, r2, input_format);
         return -1;
     }
 
-    LOGD("scores dims: w=%d h=%d c=%d", scores.w, scores.h, scores.c);
-    LOGD("boxes  dims: w=%d h=%d c=%d", boxes.w, boxes.h, boxes.c);
+    int num_anchors = scores.w;
+    int nc = scores.h;
+    num_class = nc;
 
-    // Resolve layout. Param shows scores=[w=num_anchors, h=num_class]
-    // and boxes=[w=4, h=num_anchors]; we assert and read accordingly.
-    int num_anchors = 0;
-    int nc = 0;
-    if (scores.h > 0 && scores.w > 0)
-    {
-        nc = scores.h;
-        num_anchors = scores.w;
-    }
-    else
-    {
-        LOGE("unexpected scores shape");
-        return -2;
-    }
-    if (boxes.w != 4 || boxes.h != num_anchors)
-    {
-        LOGE("unexpected boxes shape: w=%d h=%d (expected w=4 h=%d)",
-             boxes.w, boxes.h, num_anchors);
+    if (boxes.w != 4 || boxes.h != num_anchors) {
+        LOGE("boxes shape mismatch: w=%d h=%d expected w=4 h=%d", boxes.w, boxes.h, num_anchors);
         return -3;
     }
 
-    if (num_class < nc)
-    {
-        // The user's hint understated the actual class count; trust the model.
-        LOGD("num_class hint=%d but model has %d, using %d", num_class, nc, nc);
-    }
-    // Always use the actual class count from the blob shape
-    num_class = nc;
-    const int class_count = nc;
-
-    // ----- collect proposals above prob_threshold -----
     std::vector<DetObject> proposals;
     proposals.reserve(256);
-
     for (int a = 0; a < num_anchors; a++)
     {
-        // best class score for this anchor
-        int best_label = 0;
-        float best_score = -FLT_MAX;
-        for (int k = 0; k < class_count; k++)
-        {
-            // scores layout: row k is class k, length num_anchors
-            float s = at2d(scores, k, a);
-            if (s > best_score)
-            {
-                best_score = s;
-                best_label = k;
-            }
-        }
+        int best_label = 0; float best_score = -FLT_MAX;
+        for (int k = 0; k < nc; k++) { float s = at2d(scores, k, a); if (s > best_score) { best_score = s; best_label = k; } }
         if (best_score < prob_threshold) continue;
-
-        // boxes layout: row a, 4 cols xyxy
         const float* row = boxes.row(a);
-        float x1 = row[0];
-        float y1 = row[1];
-        float x2 = row[2];
-        float y2 = row[3];
-
-        if (x2 <= x1 || y2 <= y1) continue;
-
-        DetObject obj;
-        obj.label = best_label;
-        obj.prob = best_score;
-        obj.rect.x = x1;
-        obj.rect.y = y1;
-        obj.rect.width = x2 - x1;
-        obj.rect.height = y2 - y1;
+        if (row[2] <= row[0] || row[3] <= row[1]) continue;
+        DetObject obj; obj.label = best_label; obj.prob = best_score;
+        obj.rect.x = row[0]; obj.rect.y = row[1]; obj.rect.width = row[2]-row[0]; obj.rect.height = row[3]-row[1];
         proposals.push_back(obj);
     }
 
-    // ----- sort + class-aware NMS -----
     qsort_descent(proposals);
     std::vector<int> picked;
     nms_class_aware(proposals, picked, nms_threshold);
 
-    // ----- inverse letterbox back to original image -----
     objects.reserve(picked.size());
-    for (size_t i = 0; i < picked.size(); i++)
-    {
+    for (size_t i = 0; i < picked.size(); i++) {
         DetObject obj = proposals[picked[i]];
-
-        float x1 = obj.rect.x / scale;
-        float y1 = obj.rect.y / scale;
-        float x2 = (obj.rect.x + obj.rect.width) / scale;
-        float y2 = (obj.rect.y + obj.rect.height) / scale;
-
-        x1 = std::max(std::min(x1, (float)(img_w - 1)), 0.f);
-        y1 = std::max(std::min(y1, (float)(img_h - 1)), 0.f);
-        x2 = std::max(std::min(x2, (float)(img_w - 1)), 0.f);
-        y2 = std::max(std::min(y2, (float)(img_h - 1)), 0.f);
-
-        obj.rect.x = x1;
-        obj.rect.y = y1;
-        obj.rect.width = x2 - x1;
-        obj.rect.height = y2 - y1;
-        if (obj.rect.width > 0 && obj.rect.height > 0)
-            objects.push_back(obj);
+        float x1 = obj.rect.x / scale, y1 = obj.rect.y / scale;
+        float x2 = (obj.rect.x + obj.rect.width) / scale, y2 = (obj.rect.y + obj.rect.height) / scale;
+        x1 = std::max(std::min(x1, (float)(img_w-1)), 0.f); y1 = std::max(std::min(y1, (float)(img_h-1)), 0.f);
+        x2 = std::max(std::min(x2, (float)(img_w-1)), 0.f); y2 = std::max(std::min(y2, (float)(img_h-1)), 0.f);
+        obj.rect.x = x1; obj.rect.y = y1; obj.rect.width = x2-x1; obj.rect.height = y2-y1;
+        if (obj.rect.width > 0 && obj.rect.height > 0) objects.push_back(obj);
     }
 
-    LOGD("detect: anchors=%d proposals=%d kept=%d (prob>=%.2f, nms=%.2f)",
-         num_anchors, (int)proposals.size(), (int)objects.size(),
-         prob_threshold, nms_threshold);
-
+    LOGD("detect: anchors=%d proposals=%d kept=%d", num_anchors, (int)proposals.size(), (int)objects.size());
     return 0;
 }
 
@@ -572,29 +673,48 @@ bool PicoDet::is_from_screen(const cv::Mat& rgb)
 
 void PicoDet::draw_detections(cv::Mat& rgb, const std::vector<DetObject>& objects)
 {
-    // Class names and colors (BGR for OpenCV)
-    static const char* class_names[] = {"LCK", "SCR"};
-    static const cv::Scalar class_colors[] = {
-        cv::Scalar(0, 255, 0),   // LCK = green (RGB)
-        cv::Scalar(128, 0, 128), // SCR = purple (RGB)
+    // COCO 80 class names
+    static const char* coco_names[] = {
+        "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
+        "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat",
+        "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack",
+        "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball",
+        "kite", "baseball bat", "baseball glove", "skateboard", "surfboard", "tennis racket",
+        "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+        "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake",
+        "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop",
+        "mouse", "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+        "refrigerator", "book", "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
     };
-    static const int num_known = 2;
+    static const char* custom2_names[] = {"LCK", "SCR"};
+
+    // Use num_class to determine label set
+    const bool use_custom = (num_class <= 2);
 
     for (size_t i = 0; i < objects.size(); i++)
     {
         const DetObject& obj = objects[i];
 
-        cv::Scalar color;
         const char* name;
-        if (obj.label >= 0 && obj.label < num_known)
+        cv::Scalar color;
+
+        if (use_custom && obj.label >= 0 && obj.label < 2)
         {
-            color = class_colors[obj.label];
-            name = class_names[obj.label];
+            name = custom2_names[obj.label];
+            color = (obj.label == 0) ? cv::Scalar(0, 255, 0) : cv::Scalar(128, 0, 128);
+        }
+        else if (!use_custom && obj.label >= 0 && obj.label < 80)
+        {
+            name = coco_names[obj.label];
+            int r = (obj.label * 67 + 50) % 256;
+            int g = (obj.label * 113 + 100) % 256;
+            int b = (obj.label * 37 + 150) % 256;
+            color = cv::Scalar(r, g, b);
         }
         else
         {
-            color = cv::Scalar(255, 0, 0); // red fallback
             name = "?";
+            color = cv::Scalar(255, 255, 255);
         }
 
         // Draw rectangle

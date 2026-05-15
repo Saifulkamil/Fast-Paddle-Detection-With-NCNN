@@ -69,7 +69,11 @@ class _HomePageState extends State<HomePage> {
       final cpuGpu = _useGpu ? 1 : 0;
       final info = _useCustom
           ? await _detector.loadModelFromFile(paramPath: _customParamPath!, binPath: _customBinPath!, cpuGpu: cpuGpu)
-          : await _detector.loadModel(paramName: 'model.ncnn.param', binName: 'model.ncnn.bin', cpuGpu: cpuGpu);
+          : await _detector.loadModel(
+              paramName: 'model_no_post_pro.ncnn.param',
+              binName: 'model_no_post_pro.ncnn.bin',
+              cpuGpu: cpuGpu,
+            );
       if (info.success) await _detector.setThreshold(threshold: _threshold);
       final backend = _useGpu ? 'GPU' : 'CPU';
       setState(() {
@@ -90,25 +94,31 @@ class _HomePageState extends State<HomePage> {
     if (_modelLoaded) await _detector.setThreshold(threshold: _threshold);
   }
 
-  Future<void> _pickModel() async {
-    final r = await FilePicker.platform.pickFiles(allowMultiple: true, type: FileType.any);
-    if (r == null) return;
-    String? p, b;
-    for (final f in r.files) {
-      if (f.path == null) continue;
-      if (f.path!.toLowerCase().endsWith('.param')) p = f.path;
-      if (f.path!.toLowerCase().endsWith('.bin')) b = f.path;
-    }
-    if (p == null || b == null) {
-      _snack('Pick both .param and .bin');
+  Future<void> _pickParam() async {
+    final result = await FilePicker.platform.pickFiles(type: FileType.any, allowMultiple: false);
+    if (result == null || result.files.isEmpty || result.files.first.path == null) return;
+    setState(() {
+      _customParamPath = result.files.first.path;
+      _modelLoaded = false;
+    });
+    _snack('Param: ${result.files.first.name}');
+  }
+
+  Future<void> _pickBin() async {
+    final result = await FilePicker.platform.pickFiles(type: FileType.any, allowMultiple: false);
+    if (result == null || result.files.isEmpty || result.files.first.path == null) return;
+    setState(() {
+      _customBinPath = result.files.first.path;
+      _modelLoaded = false;
+    });
+    _snack('Bin: ${result.files.first.name}');
+  }
+
+  Future<void> _reloadCustomModel() async {
+    if (_customParamPath == null || _customBinPath == null) {
+      _snack('Pick both .param and .bin first');
       return;
     }
-    setState(() {
-      _customParamPath = p;
-      _customBinPath = b;
-      _modelLoaded = false;
-      _status = 'Custom model set';
-    });
     _loadModel();
   }
 
@@ -130,6 +140,7 @@ class _HomePageState extends State<HomePage> {
       threshold: _threshold,
       useCustom: _useCustom,
       customParam: _customParamPath,
+      customBin: _customBinPath,
       modelLoaded: _modelLoaded,
       loading: _loading,
       numClass: _numClass,
@@ -148,11 +159,12 @@ class _HomePageState extends State<HomePage> {
         setState(() => _antiSpoof = v);
         _detector.setAntiSpoof(enabled: v);
       },
-      onPickModel: _pickModel,
+      onPickModel: _pickParam,
+      onPickBin: _pickBin,
       onUseBundled: _useBundled,
       onReload: () {
         Navigator.pop(context);
-        _loadModel();
+        _reloadCustomModel();
       },
     ),
   );
@@ -682,7 +694,7 @@ class _GalleryTabState extends State<_GalleryTab> {
 class _SettingsSheet extends StatefulWidget {
   final double threshold;
   final bool useCustom;
-  final String? customParam;
+  final String? customParam, customBin;
   final bool modelLoaded, loading;
   final int numClass;
   final bool gpuAvailable;
@@ -691,11 +703,12 @@ class _SettingsSheet extends StatefulWidget {
   final ValueChanged<double> onThresholdChanged;
   final ValueChanged<bool> onGpuChanged;
   final ValueChanged<bool> onAntiSpoofChanged;
-  final VoidCallback onPickModel, onUseBundled, onReload;
+  final VoidCallback onPickModel, onPickBin, onUseBundled, onReload;
   const _SettingsSheet({
     required this.threshold,
     required this.useCustom,
     required this.customParam,
+    required this.customBin,
     required this.modelLoaded,
     required this.loading,
     required this.numClass,
@@ -706,6 +719,7 @@ class _SettingsSheet extends StatefulWidget {
     required this.onGpuChanged,
     required this.onAntiSpoofChanged,
     required this.onPickModel,
+    required this.onPickBin,
     required this.onUseBundled,
     required this.onReload,
   });
@@ -806,32 +820,49 @@ class _SettingsSheetState extends State<_SettingsSheet> {
         Text('Classes from model: ${widget.numClass}', style: const TextStyle(fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
         Text(
-          widget.useCustom ? 'Custom: ${widget.customParam?.split('/').last}' : 'Bundled model',
-          style: const TextStyle(fontSize: 12),
+          widget.useCustom
+              ? 'param: ${widget.customParam?.split('/').last ?? "not set"}\nbin: ${widget.customBin?.split('/').last ?? "not set"}'
+              : 'Bundled model',
+          style: const TextStyle(fontSize: 11, fontFamily: 'monospace'),
         ),
         const SizedBox(height: 8),
         Row(
           children: [
             Expanded(
-              child: OutlinedButton(
+              child: OutlinedButton.icon(
                 onPressed: widget.loading ? null : widget.onPickModel,
-                child: const Text('Pick model'),
+                icon: const Icon(Icons.description, size: 16),
+                label: const Text('.param'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: widget.loading ? null : widget.onPickBin,
+                icon: const Icon(Icons.data_object, size: 16),
+                label: const Text('.bin'),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: FilledButton.icon(
+                onPressed: widget.loading ? null : widget.onReload,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Load Custom'),
               ),
             ),
             const SizedBox(width: 8),
             Expanded(
               child: OutlinedButton(
                 onPressed: (widget.loading || !widget.useCustom) ? null : widget.onUseBundled,
-                child: const Text('Bundled'),
+                child: const Text('Use Bundled'),
               ),
             ),
           ],
-        ),
-        const SizedBox(height: 16),
-        FilledButton.icon(
-          onPressed: widget.loading ? null : widget.onReload,
-          icon: const Icon(Icons.refresh),
-          label: const Text('Reload Model'),
         ),
       ],
     ),
@@ -883,8 +914,107 @@ class _StaticPainter extends CustomPainter {
 
 // =============================================================================
 class _Cls {
-  static const _n = ['LCK', 'SCR'];
-  static const _c = [Colors.green, Colors.purple];
+  static const _n = [
+    'person',
+    'bicycle',
+    'car',
+    'motorcycle',
+    'airplane',
+    'bus',
+    'train',
+    'truck',
+    'boat',
+    'traffic light',
+    'fire hydrant',
+    'stop sign',
+    'parking meter',
+    'bench',
+    'bird',
+    'cat',
+    'dog',
+    'horse',
+    'sheep',
+    'cow',
+    'elephant',
+    'bear',
+    'zebra',
+    'giraffe',
+    'backpack',
+    'umbrella',
+    'handbag',
+    'tie',
+    'suitcase',
+    'frisbee',
+    'skis',
+    'snowboard',
+    'sports ball',
+    'kite',
+    'baseball bat',
+    'baseball glove',
+    'skateboard',
+    'surfboard',
+    'tennis racket',
+    'bottle',
+    'wine glass',
+    'cup',
+    'fork',
+    'knife',
+    'spoon',
+    'bowl',
+    'banana',
+    'apple',
+    'sandwich',
+    'orange',
+    'broccoli',
+    'carrot',
+    'hot dog',
+    'pizza',
+    'donut',
+    'cake',
+    'chair',
+    'couch',
+    'potted plant',
+    'bed',
+    'dining table',
+    'toilet',
+    'tv',
+    'laptop',
+    'mouse',
+    'remote',
+    'keyboard',
+    'cell phone',
+    'microwave',
+    'oven',
+    'toaster',
+    'sink',
+    'refrigerator',
+    'book',
+    'clock',
+    'vase',
+    'scissors',
+    'teddy bear',
+    'hair drier',
+    'toothbrush',
+    'LCK',
+    'SCR',
+  ];
+  static const _c = [
+    Colors.red, Colors.pink, Colors.orange, Colors.amber, Colors.yellow, Colors.lime,
+    Colors.green, Colors.teal, Colors.cyan, Colors.blue, Colors.indigo, Colors.purple,
+    Colors.red, Colors.pink, Colors.orange, Colors.amber, Colors.yellow, Colors.lime,
+    Colors.green, Colors.teal, Colors.cyan, Colors.blue, Colors.indigo, Colors.purple,
+    Colors.red, Colors.pink, Colors.orange, Colors.amber, Colors.yellow, Colors.lime,
+    Colors.green, Colors.teal, Colors.cyan, Colors.blue, Colors.indigo, Colors.purple,
+    Colors.red, Colors.pink, Colors.orange, Colors.amber, Colors.yellow, Colors.lime,
+    Colors.green, Colors.teal, Colors.cyan, Colors.blue, Colors.indigo, Colors.purple,
+    Colors.red, Colors.pink, Colors.orange, Colors.amber, Colors.yellow, Colors.lime,
+    Colors.green, Colors.teal, Colors.cyan, Colors.blue, Colors.indigo, Colors.purple,
+    Colors.red, Colors.pink, Colors.orange, Colors.amber, Colors.yellow, Colors.lime,
+    Colors.green, Colors.teal, Colors.cyan, Colors.blue, Colors.indigo, Colors.purple,
+    Colors.red, Colors.pink, Colors.orange, Colors.amber, Colors.yellow, Colors.lime,
+    Colors.green, Colors.teal,
+    Colors.green, Colors.purple, // LCK, SCR
+  ];
   static String name(int l) => l >= 0 && l < _n.length ? _n[l] : 'C$l';
-  static Color color(int l) => l >= 0 && l < _c.length ? _c[l] : Colors.red;
+  static Color color(int l) => l >= 0 && l < _c.length ? _c[l] : Colors.grey;
 }

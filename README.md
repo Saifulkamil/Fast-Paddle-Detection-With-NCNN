@@ -10,11 +10,14 @@ This plugin supports real-time detection directly from the camera feed, photo ca
 ## ✨ Key Features
 
 - ⚡ **Real-time Detection**: Detect objects instantly from the live camera preview.
+- 🎯 **Native C++ Bbox Drawing**: Bounding boxes drawn directly on the frame in C++ — zero coordinate mapping issues.
+- 🔀 **Multi-Model Support**: Auto-detects model format (with/without post-processing). Load COCO 80-class or custom finetune models.
 - 📸 **Photo Capture**: Save both clean and annotated (with bbox) images on detection.
 - 🔦 **Flash Control**: Toggle camera flash/torch on/off.
 - 🔄 **Switch Camera**: Toggle between front and back camera.
 - 📱 **Orientation Aware**: Camera preview rotates with device physical orientation (app stays portrait).
-- 🧠 **Auto Class Detection**: Number of classes read from model blob shape automatically.
+- 🎛️ **Runtime Model Loading**: Pick and load custom models from device storage at runtime.
+- 🧠 **Auto Class Detection**: Number of classes and label names detected automatically.
 - ⚡ **GPU Acceleration**: Optional Vulkan GPU inference with auto-detection of GPU availability.
 - 📴 **100% Offline**: Uses local NCNN models. No API calls or cloud dependencies.
 - 🔋 **Optimized Performance**: Minimal bitmap copies per frame, on-demand capture allocation.
@@ -309,88 +312,174 @@ class CaptureResult {
 
 ---
 
-## 🧠 Model Specification (Important!)
+## 🧠 Model Specification
 
-This plugin expects a specific NCNN model format. If you want to use your own model or train a custom one, follow this specification.
+This plugin supports **two model formats** automatically detected at load time:
 
-### Model Architecture
+### Format A: Model WITH Post-Processing (Finetune/Custom)
 
-The plugin is designed for **PP-PicoDet** models exported from PaddleDetection via PNNX/ONNX to NCNN format, with **post-processing baked into the graph**.
+For models exported from PaddleDetection **with** baked-in NMS/TopK. The plugin extracts intermediate blobs before the unsupported post-processing layers.
 
-### Input Specification
+- **2 inputs**: `in0` = metadata `[4]`, `in1` = pixels `[3,320,320]`
+- **Intermediate blobs**: scores + boxes extracted before NMS
+- **Stub layers**: `pnnx.Expression`, `NonMaxSuppression`, `TopK`, `Gather`, `F.embedding`, `Tensor.to`
 
-The model must have **2 input blobs**:
+### Format C: Model WITHOUT Post-Processing (Recommended ✅)
 
-| Blob Name | Shape | Description |
-|-----------|-------|-------------|
-| `in0` | `[4]` | Metadata: `[target_height, target_width, scale_factor_h, scale_factor_w]` |
-| `in1` | `[3, 320, 320]` | Normalized RGB image tensor (after letterbox + normalize) |
+For models exported **without** post-processing. All layers are standard ncnn ops — no stubs needed. The plugin performs FPN decode + DFL + NMS in C++.
 
-**Preprocessing (handled by plugin):**
-1. Resize image keeping aspect ratio to fit 320×320
-2. Pad (letterbox) to exactly 320×320 with zeros
-3. Normalize: `mean = [123.675, 116.28, 103.53]`, `norm = [0.017125, 0.017507, 0.017429]`
-4. `in0` is filled with `[320, 320, scale_h, scale_w]` where scale = 320/max(img_w, img_h)
+- **1 input**: `in0` = pixels `[3,320,320]`
+- **8 outputs**: `out0-3` (cls per stride), `out4-7` (dis per stride)
+- **Strides**: 8, 16, 32, 64
+- **DFL reg_max**: 7 (32 bins = 4 × 8)
 
-### Output Specification (Intermediate Blobs)
+### Labels
 
-The plugin extracts **intermediate blobs** (not final output), because the model's built-in post-processing uses ops that ncnn doesn't support natively:
+- **2-class model** → labels: "LCK", "SCR" (green, purple)
+- **80-class model** → labels: COCO names (person, bicycle, car, cup, etc.)
+- Auto-detected from `num_class` at runtime
 
-| Blob Name | Shape | Description |
-|-----------|-------|-------------|
-| `"317"` | `[w=num_anchors, h=num_class]` | Per-anchor class scores (already sigmoid-activated) |
-| `"339"` | `[w=4, h=num_anchors]` | Decoded boxes in xyxy format (in 320×320 input pixel space, multiplied by stride factor) |
+---
 
-**For the default PicoDet model:**
-- `num_anchors = 2125` (sum of all FPN levels: 40×40 + 20×20 + 10×10 + 5×5 = 1600+400+100+25)
-- `num_class = 2` (detected from blob shape automatically)
+## 🔧 Using Pretrained PicoDet Models
 
-### Post-processing (handled by plugin in C++)
+You can download pretrained PicoDet models from the official PaddleDetection repository:
 
-1. For each anchor: find best class score → filter by `prob_threshold`
-2. Read box coordinates from blob 339: `[x1, y1, x2, y2]`
-3. Class-aware NMS with `nms_threshold`
-4. Inverse letterbox: divide coordinates by scale factor to get original image pixels
+👉 **[PaddleDetection PicoDet Model Zoo](https://github.com/PaddlePaddle/PaddleDetection/blob/release/2.9/configs/picodet/README_en.md)**
 
-### Unsupported Layers (Handled by No-op Stubs)
+### Recommended Models (320×320 input)
 
-The model graph contains these layers that ncnn doesn't support. The plugin registers no-op stubs for them so `load_param` succeeds:
+| Model | mAP | Size | Speed |
+|-------|-----|------|-------|
+| PicoDet-S 320 | 29.1 | 4.4MB | Fast |
+| PicoDet-M 320 | 34.4 | 11.0MB | Medium |
+| PicoDet-L 320 | 36.1 | 14.0MB | Slower |
 
-- `pnnx.Expression`
-- `NonMaxSuppression`
-- `TopK`
-- `Gather`
-- `F.embedding`
-- `Tensor.to`
+### Step-by-Step: Download & Convert Model
 
-These are all in the post-processing tail and are never executed (ncnn evaluates lazily).
- 
+#### 1. Download ONNX Model (without post-processing)
 
-### Model Compatibility Checklist
+From PaddleDetection model zoo, download the **ONNX model without post-processing**:
 
-| Requirement | ✓ |
-|-------------|---|
-| PicoDet architecture (PP-PicoDet-S/M/L) | Required |
-| Input size 320×320 | Required (hardcoded in plugin) |
-| Post-processing baked in (NMS, TopK, etc.) | Required |
-| Exported via PNNX from ONNX | Required |
-| 2 input blobs (`in0` metadata, `in1` pixels) | Required |
-| Intermediate score blob accessible | Required |
-| Intermediate box blob accessible | Required |
-
-### Changing Blob Names
-
-If your model has different blob numbers for scores/boxes, update in `ppdet_pico.cpp`:
-
-```cpp
-// In detect() function:
-int r1 = ex.extract("317", scores);  // ← change "317" to your score blob
-int r2 = ex.extract("339", boxes);   // ← change "339" to your box blob
+```
+picodet_s_320_coco_lcnet.onnx        (NOT the _postprocessed version)
+picodet_m_320_coco_lcnet.onnx
+picodet_l_320_coco_lcnet.onnx
 ```
 
-To find the correct blob numbers, open your `.param` file and look for:
-- **Score blob**: the `Concat` that merges all FPN-level class predictions (shape `[num_anchors, num_class]`)
-- **Box blob**: the `BinaryOp` (multiply) that produces decoded xyxy boxes (shape `[4, num_anchors]`)
+> ⚠️ **Important**: Download the version **WITHOUT** `_postprocessed` in the filename. The plugin handles post-processing in C++.
+
+#### 2. Convert ONNX → NCNN using PNNX
+
+Install PNNX from [ncnn releases](https://github.com/Tencent/ncnn/releases), then:
+
+```bash
+pnnx picodet_s_320_coco_lcnet.onnx inputshape=[1,3,320,320]f32
+```
+
+This produces:
+- `picodet_s_320_coco_lcnet.ncnn.param`
+- `picodet_s_320_coco_lcnet.ncnn.bin`
+
+#### 3. Fix `Resize` Layers (if present)
+
+Open the `.ncnn.param` file and check if there are `Resize` layers. If yes, replace them with `Interp`:
+
+**Find lines like:**
+```
+Resize    Resize_162    1 1 82 85
+```
+
+**Replace with:**
+```
+Interp    Resize_162    1 1 82 85 0=1 1=2.0 2=2.0 6=0
+```
+
+(Parameters: `0=1` nearest mode, `1=2.0` height scale, `2=2.0` width scale, `6=0` align corner)
+
+#### 4. Place in Assets
+
+Copy both files to your Flutter project:
+```
+android/app/src/main/assets/
+├── model.ncnn.param    (renamed from picodet_s_320_coco_lcnet.ncnn.param)
+└── model.ncnn.bin      (renamed from picodet_s_320_coco_lcnet.ncnn.bin)
+```
+
+#### 5. Load in Code
+
+```dart
+final info = await detector.loadModel(
+  paramName: 'model.ncnn.param',
+  binName: 'model.ncnn.bin',
+);
+print('Loaded ${info.numClass} classes'); // 80 for COCO
+```
+
+### Converting Your Own Finetune Model
+
+If you trained a custom PicoDet model with PaddleDetection:
+
+#### Option A: Export WITHOUT post-processing (Recommended)
+
+```bash
+# Export from PaddleDetection
+python tools/export_model.py \
+  -c configs/picodet/your_config.yml \
+  -o weights=output/best_model.pdparams \
+     export.benchmark=True \
+     export.post_process=False \
+     export.nms=False \
+  --output_dir=inference_model
+
+# Convert to ONNX
+paddle2onnx --model_dir inference_model/your_model \
+  --model_filename model.pdmodel \
+  --params_filename model.pdiparams \
+  --save_file model.onnx \
+  --opset_version 11
+
+# (Optional) Simplify
+python -m onnxsim model.onnx model_sim.onnx
+
+# Convert to NCNN
+pnnx model_sim.onnx inputshape=[1,3,320,320]f32
+```
+
+#### Option B: Export WITH post-processing
+
+```bash
+# Export with default post-processing
+python tools/export_model.py \
+  -c configs/picodet/your_config.yml \
+  -o weights=output/best_model.pdparams \
+  --output_dir=inference_model
+
+# Convert to ONNX
+paddle2onnx --model_dir inference_model/your_model \
+  --model_filename model.pdmodel \
+  --params_filename model.pdiparams \
+  --save_file model.onnx \
+  --opset_version 11
+
+# Convert to NCNN (2 inputs for postprocessed model)
+pnnx model.onnx inputshape=[1,2]f32,[1,3,320,320]f32
+```
+
+> Note: Option B models may need `Resize` → `Interp` replacement in the `.param` file.
+
+### Loading Custom Model at Runtime
+
+Users can also load models from device storage at runtime:
+
+```dart
+final info = await detector.loadModelFromFile(
+  paramPath: '/storage/emulated/0/Download/my_model.ncnn.param',
+  binPath: '/storage/emulated/0/Download/my_model.ncnn.bin',
+);
+```
+
+Or use the built-in file picker in the example app (Settings → Pick .param → Pick .bin → Load Custom).
 
 ---
 
@@ -429,11 +518,12 @@ Kotlin (CameraX + Plugin)
           ▼
 C++ / JNI
     │
+    ├── Auto-detect model format (A/C) at load time
     ├── NCNN inference (ncnn-20260113-android-vulkan)
-    │     ├── No-op stub layers for unsupported ops
-    │     └── Extract intermediate blobs (lazy evaluation)
+    │     ├── Format A: stub layers + extract intermediate blobs
+    │     └── Format C: standard FPN decode (DFL + softmax + NMS)
     ├── Anti-spoof (FFT moiré pattern detection)
-    ├── Post-processing (threshold + NMS + inverse letterbox)
+    ├── Dynamic labels (COCO 80 or custom 2-class)
     ├── OpenCV bbox drawing (rectangle + putText)
     └── OpenCV Mobile 4.13.0 (core + imgproc + highgui)
 ```

@@ -389,7 +389,7 @@ Java_com_iweka_paddle_1detection_PaddleDetectionPlugin_nativeDetectAndDraw(
         {
             g_picodet->detect(rgb, objects);
             // Draw bbox onto rgb
-            PicoDet::draw_detections(rgb, objects);
+            g_picodet->draw_detections(rgb, objects);
         }
         else
         {

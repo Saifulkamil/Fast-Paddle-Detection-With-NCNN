@@ -15,6 +15,7 @@
 #ifndef PPDET_PICO_H
 #define PPDET_PICO_H
 
+#include <string>
 #include <vector>
 
 #include <opencv2/core/core.hpp>
@@ -56,7 +57,7 @@ public:
     bool get_anti_spoof() const { return anti_spoof_enabled; }
 
     // Draw bounding boxes directly onto an RGB image (modifies in-place).
-    static void draw_detections(cv::Mat& rgb, const std::vector<DetObject>& objects);
+    void draw_detections(cv::Mat& rgb, const std::vector<DetObject>& objects);
 
 protected:
     ncnn::Net picodet_net;
@@ -65,6 +66,20 @@ protected:
     float prob_threshold;
     float nms_threshold;
     bool anti_spoof_enabled;
+
+    // Model format detection (set during first successful inference)
+    // 0 = unknown
+    // 1 = format A (in0=meta4, in1=pixels, blobs 317/339) — finetune model with baked postprocess
+    // 2 = format B (in0=pixels, in1=meta2, blobs 313/335) — COCO model with baked postprocess
+    // 3 = format C (in0=pixels only, out0-7 FPN outputs) — model without postprocess
+    int input_format;
+    std::string score_blob_name;
+    std::string box_blob_name;
+
+    void _detect_input_format();
+
+    // FPN decode for format C
+    int _detect_fpn(const ncnn::Mat& in_pad, float scale, int img_w, int img_h, std::vector<DetObject>& objects);
 };
 
 #endif // PPDET_PICO_H
