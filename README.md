@@ -26,22 +26,29 @@ This plugin supports real-time detection directly from the camera feed, photo ca
 
 *(Replace placeholder links with your uploaded media)*
 
-<table align="center">
+
+ <table align="center">
   <tr>
     <td align="center"><b>Real-Time Detection</b></td>
     <td align="center"><b>Photo Capture Result</b></td>
   </tr>
   <tr>
     <td align="center">
-      <img src="#" alt="Realtime Detection" width="250">
+      <img 
+        src="https://github.com/user-attachments/assets/c0c2a589-fd61-400c-9d30-6fae2b47826f"
+        alt="Real-Time Detection"
+        width="250"
+      >
     </td>
     <td align="center">
-      <img src="#" alt="Photo Capture" width="250">
+      <img 
+        src="https://github.com/user-attachments/assets/40f46ae4-3f30-4df2-b7f6-c0ecd9b572d1"
+        alt="Photo Capture Result"
+        width="250"
+      >
     </td>
   </tr>
 </table>
-
----
 
 ## 📱 Platform Support
 
