@@ -115,6 +115,18 @@ class PaddleDetection {
     return result ?? 0;
   }
 
+  /// Enable/disable anti-spoof detection.
+  /// When enabled, detection is skipped if the image appears to be from a screen/monitor.
+  Future<void> setAntiSpoof({required bool enabled}) async {
+    await _methodChannel.invokeMethod('setAntiSpoof', {'enabled': enabled});
+  }
+
+  /// Check if anti-spoof is currently enabled.
+  Future<bool> getAntiSpoof() async {
+    final result = await _methodChannel.invokeMethod<bool>('getAntiSpoof');
+    return result ?? false;
+  }
+
   /// Detect objects in an image file.
   Future<List<DetectionResult>> detect(String imagePath) {
     return PaddleDetectionPlatform.instance.detect(imagePath: imagePath);

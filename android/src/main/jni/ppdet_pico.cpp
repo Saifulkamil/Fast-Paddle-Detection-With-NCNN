@@ -152,7 +152,8 @@ PicoDet::PicoDet()
     : target_size(320),
       num_class(1),
       prob_threshold(0.4f),
-      nms_threshold(0.5f)
+      nms_threshold(0.5f),
+      anti_spoof_enabled(false)
 {
 }
 
@@ -262,6 +263,16 @@ void PicoDet::set_nms_threshold(float t)  { nms_threshold = t; }
 int PicoDet::detect(const cv::Mat& rgb, std::vector<DetObject>& objects)
 {
     objects.clear();
+
+    // Anti-spoof: if enabled, check if image is from screen first
+    if (anti_spoof_enabled)
+    {
+        if (is_from_screen(rgb))
+        {
+            LOGD("detect: anti-spoof triggered — image appears to be from screen, skipping detection");
+            return 1; // return 1 = spoof detected, no objects
+        }
+    }
 
     const int img_w = rgb.cols;
     const int img_h = rgb.rows;
@@ -440,6 +451,120 @@ int PicoDet::detect(const cv::Mat& rgb, std::vector<DetObject>& objects)
     return 0;
 }
 
+
+// ============================================================================
+// Anti-spoof: Detect if image is from a screen/monitor
+// Uses moiré pattern detection via FFT frequency analysis
+// ============================================================================
+
+bool PicoDet::is_from_screen(const cv::Mat& rgb)
+{
+    // Convert to grayscale
+    cv::Mat gray;
+    cv::cvtColor(rgb, gray, cv::COLOR_RGB2GRAY);
+
+    // Resize to fixed size for consistent analysis
+    cv::Mat resized;
+    cv::resize(gray, resized, cv::Size(256, 256));
+
+    // Convert to float for DFT
+    cv::Mat floatImg;
+    resized.convertTo(floatImg, CV_32F);
+
+    // Apply DFT
+    cv::Mat dft_result;
+    cv::dft(floatImg, dft_result, cv::DFT_COMPLEX_OUTPUT);
+
+    // Shift zero-frequency to center
+    int cx = dft_result.cols / 2;
+    int cy = dft_result.rows / 2;
+
+    // Split into real and imaginary
+    std::vector<cv::Mat> planes;
+    cv::split(dft_result, planes);
+
+    // Compute magnitude
+    cv::Mat magnitude;
+    cv::magnitude(planes[0], planes[1], magnitude);
+
+    // Log scale
+    magnitude += cv::Scalar::all(1);
+    cv::log(magnitude, magnitude);
+
+    // Normalize
+    cv::normalize(magnitude, magnitude, 0, 1, cv::NORM_MINMAX);
+
+    // Analyze high-frequency content
+    // Screen moiré creates peaks in mid-to-high frequency bands
+    // Measure energy in high-frequency ring (exclude DC center and very high noise)
+    float high_freq_energy = 0;
+    float mid_freq_energy = 0;
+    float total_energy = 0;
+    int high_count = 0;
+    int mid_count = 0;
+    int total_count = 0;
+
+    for (int y = 0; y < magnitude.rows; y++)
+    {
+        for (int x = 0; x < magnitude.cols; x++)
+        {
+            float dist = std::sqrt((float)((x - cx) * (x - cx) + (y - cy) * (y - cy)));
+            float val = magnitude.at<float>(y, x);
+            total_energy += val;
+            total_count++;
+
+            // Mid frequency band (20-60% of max radius)
+            if (dist > cx * 0.2f && dist < cx * 0.6f)
+            {
+                mid_freq_energy += val;
+                mid_count++;
+            }
+            // High frequency band (60-90% of max radius)
+            if (dist > cx * 0.6f && dist < cx * 0.9f)
+            {
+                high_freq_energy += val;
+                high_count++;
+            }
+        }
+    }
+
+    // Compute ratios
+    float avg_mid = mid_count > 0 ? mid_freq_energy / mid_count : 0;
+    float avg_high = high_count > 0 ? high_freq_energy / high_count : 0;
+    float avg_total = total_count > 0 ? total_energy / total_count : 0;
+
+    // Moiré pattern indicator: high ratio of mid+high frequency to total
+    // Real-world images have most energy in low frequencies
+    // Screen images have elevated mid/high frequency due to pixel grid
+    float screen_score = (avg_mid + avg_high) / (avg_total + 1e-6f);
+
+    // Also check for periodic peaks (moiré is periodic)
+    // Count pixels above threshold in high-freq band
+    int peak_count = 0;
+    float peak_threshold = avg_high * 2.0f;
+    for (int y = 0; y < magnitude.rows; y++)
+    {
+        for (int x = 0; x < magnitude.cols; x++)
+        {
+            float dist = std::sqrt((float)((x - cx) * (x - cx) + (y - cy) * (y - cy)));
+            if (dist > cx * 0.4f && dist < cx * 0.85f)
+            {
+                if (magnitude.at<float>(y, x) > peak_threshold)
+                    peak_count++;
+            }
+        }
+    }
+
+    float peak_ratio = (float)peak_count / (float)(magnitude.rows * magnitude.cols);
+
+    LOGD("anti-spoof: screen_score=%.4f peak_ratio=%.4f", screen_score, peak_ratio);
+
+    // Thresholds (tuned empirically)
+    // screen_score > 1.5 OR peak_ratio > 0.05 → likely from screen
+    bool is_screen = (screen_score > 1.5f) || (peak_ratio > 0.05f);
+
+    return is_screen;
+}
 
 // ============================================================================
 // Draw detections onto RGB image

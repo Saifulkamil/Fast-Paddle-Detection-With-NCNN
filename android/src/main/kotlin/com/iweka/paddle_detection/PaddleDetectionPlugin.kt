@@ -79,6 +79,8 @@ class PaddleDetectionPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
     private external fun nativeGetNumClass(): Int
     private external fun nativeHasGpu(): Int
     private external fun nativeGetGpuCount(): Int
+    private external fun nativeSetAntiSpoof(enabled: Boolean)
+    private external fun nativeIsAntiSpoofEnabled(): Boolean
     private external fun nativeDispose()
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -119,6 +121,8 @@ class PaddleDetectionPlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
             "getNumClass" -> result.success(nativeGetNumClass())
             "hasGpu" -> result.success(nativeHasGpu() > 0)
             "getGpuCount" -> result.success(nativeGetGpuCount())
+            "setAntiSpoof" -> { nativeSetAntiSpoof(call.argument<Boolean>("enabled") ?: false); result.success(true) }
+            "getAntiSpoof" -> result.success(nativeIsAntiSpoofEnabled())
             "startCamera" -> handleStartCamera(call, result)
             "stopCamera" -> { stopCamera(); result.success(true) }
             "toggleFlash" -> handleToggleFlash(call, result)

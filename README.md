@@ -17,6 +17,7 @@ This plugin supports real-time detection directly from the camera feed, photo ca
 - ⚡ **GPU Acceleration**: Optional Vulkan GPU inference with auto-detection of GPU availability.
 - 📴 **100% Offline**: Uses local NCNN models. No API calls or cloud dependencies.
 - 🔋 **Optimized Performance**: Minimal bitmap copies per frame, on-demand capture allocation.
+- 🛡️ **Anti-Spoof Detection**: Detect and reject images from screens/monitors using moiré pattern analysis (FFT-based).
 
 ---
 
@@ -213,7 +214,28 @@ final hasGpu = await detector.hasGpu();     // true if Vulkan available
 final gpuCount = await detector.getGpuCount(); // number of GPU devices
 ```
 
-### 8. Cleanup
+### 8. Anti-Spoof (Screen Detection)
+
+When enabled, the plugin checks if the camera is pointed at a screen/monitor. If detected, object detection is skipped (returns empty results).
+
+```dart
+// Enable anti-spoof
+await detector.setAntiSpoof(enabled: true);
+
+// Disable anti-spoof
+await detector.setAntiSpoof(enabled: false);
+
+// Check current state
+final isOn = await detector.getAntiSpoof();
+```
+
+**How it works:**
+- Converts frame to grayscale → FFT frequency analysis
+- Screens emit moiré patterns (periodic high-frequency artifacts from pixel grid)
+- If moiré pattern detected → frame is from screen → skip detection
+- Real-world objects pass through → normal detection runs
+
+### 9. Cleanup
 
 ```dart
 await detector.stopCamera();
@@ -232,6 +254,8 @@ await detector.dispose();
 | `getNumClass()` | Get number of classes from loaded model |
 | `hasGpu()` | Check if Vulkan GPU is available |
 | `getGpuCount()` | Get number of GPU devices |
+| `setAntiSpoof(enabled)` | Enable/disable screen detection (anti-spoof) |
+| `getAntiSpoof()` | Check if anti-spoof is enabled |
 | `detect(imagePath)` | Run detection on image file |
 | `detectFromBytes(data, width, height)` | Run detection on raw RGBA bytes |
 | `startCamera()` | Start native camera, returns texture info |
@@ -373,6 +397,7 @@ To find the correct blob numbers, open your `.param` file and look for:
 7. **Debug FPS**: In debug builds, FPS and inference time are shown as an overlay badge.
 8. **Orientation**: Camera preview automatically rotates with device physical orientation while app stays portrait.
 9. **Num Classes**: The plugin auto-detects the number of classes from the model's blob shape — no need to specify manually.
+10. **Anti-Spoof**: Enable `setAntiSpoof(enabled: true)` to prevent detection from screen/monitor images. Useful for validation scenarios where you need real-world captures only. Threshold may need tuning for your specific use case.
 
 ---
 
@@ -399,6 +424,7 @@ C++ / JNI
     ├── NCNN inference (ncnn-20260113-android-vulkan)
     │     ├── No-op stub layers for unsupported ops
     │     └── Extract intermediate blobs (lazy evaluation)
+    ├── Anti-spoof (FFT moiré pattern detection)
     ├── Post-processing (threshold + NMS + inverse letterbox)
     ├── OpenCV bbox drawing (rectangle + putText)
     └── OpenCV Mobile 4.13.0 (core + imgproc + highgui)

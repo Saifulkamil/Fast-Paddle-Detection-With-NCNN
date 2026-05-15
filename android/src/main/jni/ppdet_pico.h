@@ -47,6 +47,14 @@ public:
 
     int detect(const cv::Mat& rgb, std::vector<DetObject>& objects);
 
+    // Anti-spoof: detect if image is from a screen/monitor.
+    // Returns true if image appears to be from a screen (moiré pattern detected).
+    static bool is_from_screen(const cv::Mat& rgb);
+
+    // Enable/disable anti-spoof check before detection.
+    void set_anti_spoof(bool enabled) { anti_spoof_enabled = enabled; }
+    bool get_anti_spoof() const { return anti_spoof_enabled; }
+
     // Draw bounding boxes directly onto an RGB image (modifies in-place).
     static void draw_detections(cv::Mat& rgb, const std::vector<DetObject>& objects);
 
@@ -56,6 +64,7 @@ protected:
     int num_class;
     float prob_threshold;
     float nms_threshold;
+    bool anti_spoof_enabled;
 };
 
 #endif // PPDET_PICO_H

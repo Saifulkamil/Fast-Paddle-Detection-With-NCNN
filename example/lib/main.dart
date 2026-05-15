@@ -40,7 +40,8 @@ class _HomePageState extends State<HomePage> {
   bool get _useCustom => _customParamPath != null && _customBinPath != null;
   int _tabIndex = 0;
   bool _gpuAvailable = false;
-  bool _useGpu = false; // default CPU
+  bool _useGpu = false;
+  bool _antiSpoof = false; // default CPU
 
   @override
   void initState() {
@@ -134,6 +135,7 @@ class _HomePageState extends State<HomePage> {
       numClass: _numClass,
       gpuAvailable: _gpuAvailable,
       useGpu: _useGpu,
+      antiSpoof: _antiSpoof,
       onThresholdChanged: (v) {
         setState(() => _threshold = v);
         _applyThreshold();
@@ -141,6 +143,10 @@ class _HomePageState extends State<HomePage> {
       onGpuChanged: (v) {
         setState(() => _useGpu = v);
         _loadModel(); // reload with new backend
+      },
+      onAntiSpoofChanged: (v) {
+        setState(() => _antiSpoof = v);
+        _detector.setAntiSpoof(enabled: v);
       },
       onPickModel: _pickModel,
       onUseBundled: _useBundled,
@@ -681,8 +687,10 @@ class _SettingsSheet extends StatefulWidget {
   final int numClass;
   final bool gpuAvailable;
   final bool useGpu;
+  final bool antiSpoof;
   final ValueChanged<double> onThresholdChanged;
   final ValueChanged<bool> onGpuChanged;
+  final ValueChanged<bool> onAntiSpoofChanged;
   final VoidCallback onPickModel, onUseBundled, onReload;
   const _SettingsSheet({
     required this.threshold,
@@ -693,8 +701,10 @@ class _SettingsSheet extends StatefulWidget {
     required this.numClass,
     required this.gpuAvailable,
     required this.useGpu,
+    required this.antiSpoof,
     required this.onThresholdChanged,
     required this.onGpuChanged,
+    required this.onAntiSpoofChanged,
     required this.onPickModel,
     required this.onUseBundled,
     required this.onReload,
@@ -706,11 +716,13 @@ class _SettingsSheet extends StatefulWidget {
 class _SettingsSheetState extends State<_SettingsSheet> {
   late double _tr;
   late bool _gpu;
+  late bool _spoof;
   @override
   void initState() {
     super.initState();
     _tr = widget.threshold;
     _gpu = widget.useGpu;
+    _spoof = widget.antiSpoof;
   }
 
   @override
@@ -769,6 +781,27 @@ class _SettingsSheetState extends State<_SettingsSheet> {
         ),
         if (!widget.gpuAvailable)
           const Text('GPU not available on this device', style: TextStyle(fontSize: 11, color: Colors.grey)),
+        const Divider(),
+        // Anti-spoof toggle
+        Row(
+          children: [
+            const Text('Anti-Spoof: ', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Spacer(),
+            Text(_spoof ? 'ON' : 'OFF', style: const TextStyle(fontSize: 12)),
+            const SizedBox(width: 8),
+            Switch(
+              value: _spoof,
+              onChanged: (v) {
+                setState(() => _spoof = v);
+                widget.onAntiSpoofChanged(v);
+              },
+            ),
+          ],
+        ),
+        const Text(
+          'Skip detection if image is from screen/monitor',
+          style: TextStyle(fontSize: 11, color: Colors.grey),
+        ),
         const Divider(),
         Text('Classes from model: ${widget.numClass}', style: const TextStyle(fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),

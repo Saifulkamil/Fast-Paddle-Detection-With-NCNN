@@ -460,7 +460,6 @@ Java_com_iweka_paddle_1detection_PaddleDetectionPlugin_nativeSetThreshold(
 
 // ============================================================================
 // JNI: nativeGetNumClass
-// Returns the number of classes detected from the loaded model.
 // ============================================================================
 
 JNIEXPORT jint JNICALL
@@ -471,6 +470,36 @@ Java_com_iweka_paddle_1detection_PaddleDetectionPlugin_nativeGetNumClass(
     if (g_picodet)
         return g_picodet->get_num_class();
     return 0;
+}
+
+// ============================================================================
+// JNI: nativeSetAntiSpoof
+// ============================================================================
+
+JNIEXPORT void JNICALL
+Java_com_iweka_paddle_1detection_PaddleDetectionPlugin_nativeSetAntiSpoof(
+    JNIEnv* env, jobject thiz, jboolean enabled)
+{
+    ncnn::MutexLockGuard g(g_lock);
+    if (g_picodet)
+    {
+        g_picodet->set_anti_spoof(enabled);
+        LOGD("nativeSetAntiSpoof: %s", enabled ? "ON" : "OFF");
+    }
+}
+
+// ============================================================================
+// JNI: nativeIsAntiSpoofEnabled
+// ============================================================================
+
+JNIEXPORT jboolean JNICALL
+Java_com_iweka_paddle_1detection_PaddleDetectionPlugin_nativeIsAntiSpoofEnabled(
+    JNIEnv* env, jobject thiz)
+{
+    ncnn::MutexLockGuard g(g_lock);
+    if (g_picodet)
+        return g_picodet->get_anti_spoof() ? JNI_TRUE : JNI_FALSE;
+    return JNI_FALSE;
 }
 
 // ============================================================================
