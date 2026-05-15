@@ -33,3 +33,5 @@ migrate_working_dir/
 build/
 example/android/app/src/main/assets/model.ncnn.param
 example/android/app/src/main/assets/model.ncnn.bin
+implementation_plan.md
+
